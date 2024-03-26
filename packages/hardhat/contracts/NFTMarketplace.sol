@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";  // Import ERC721 interface for NFT handling
+import "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";  // Import ERC721Holder to safely handle NFT transfers
+import "@openzeppelin/contracts/access/Ownable.sol";  // Import Ownable for contract ownership control
 
 contract NFTMarketplace is ERC721Holder, Ownable {
     uint256 public feePercentage;   // Fee percentage to be set by the marketplace owner
@@ -15,12 +15,20 @@ contract NFTMarketplace is ERC721Holder, Ownable {
         bool isActive;
     }
 
+    struct Transaction {
+        address buyer;
+        uint256 amount;
+        bool isFundsReleased;
+    }
+
     mapping(address => mapping(uint256 => Listing)) private listings;
+    mapping(address => mapping(uint256 => Transaction)) private escrow;
 
     event NFTListed(address indexed seller, uint256 indexed tokenId, uint256 price);
     event NFTSold(address indexed seller, address indexed buyer, uint256 indexed tokenId, uint256 price);
     event NFTPriceChanged(address indexed seller, uint256 indexed tokenId, uint256 newPrice);
     event NFTUnlisted(address indexed seller, uint256 indexed tokenId);
+    event FundsReleased(address indexed buyer, address indexed seller, uint256 indexed tokenId, uint256 amount);
 
     constructor() {
         feePercentage = 2;  // Setting the default fee percentage to 2%
@@ -43,11 +51,34 @@ contract NFTMarketplace is ERC721Holder, Ownable {
         emit NFTListed(msg.sender, tokenId, price);
     }
 
-    // Function to buy an NFT listed on the marketplace
+    // Function to buy an NFT listed on the marketplace and put funds in escrow
     function buyNFT(address nftContract, uint256 tokenId) external payable {
         Listing storage listing = listings[nftContract][tokenId];
         require(listing.isActive, "NFT is not listed for sale");
         require(msg.value >= listing.price, "Insufficient payment");
+
+        // Put funds in escrow
+        escrow[nftContract][tokenId] = Transaction({
+            buyer: msg.sender,
+            amount: msg.value,
+            isFundsReleased: false
+        });
+
+        // Transfer the NFT from the marketplace contract to the buyer after confirmation
+        IERC721(nftContract).safeTransferFrom(address(this), msg.sender, tokenId);
+
+        emit NFTSold(listing.seller, msg.sender, tokenId, listing.price);
+    }
+
+    // Function for the buyer to confirm receipt of the NFT and release funds to the seller
+    function confirmReceipt(address nftContract, uint256 tokenId) external {
+        Transaction storage transaction = escrow[nftContract][tokenId];
+        Listing storage listing = listings[nftContract][tokenId];
+        require(msg.sender == transaction.buyer, "You are not the buyer");
+
+        require(!transaction.isFundsReleased, "Funds already released");
+
+        transaction.isFundsReleased = true;
 
         // Calculate and transfer the fee to the marketplace owner
         uint256 feeAmount = (listing.price * feePercentage) / PERCENTAGE_BASE;
@@ -57,13 +88,7 @@ contract NFTMarketplace is ERC721Holder, Ownable {
         // Transfer the remaining amount to the seller
         payable(listing.seller).transfer(sellerAmount);
 
-        // Transfer the NFT from the marketplace contract to the buyer
-        IERC721(nftContract).safeTransferFrom(address(this), msg.sender, tokenId);
-
-        // Update the listing
-        listing.isActive = false;
-
-        emit NFTSold(listing.seller, msg.sender, tokenId, listing.price);
+        emit FundsReleased(transaction.buyer, listing.seller, tokenId, transaction.amount);
     }
 
     // Function to change the price of a listed NFT
@@ -94,11 +119,4 @@ contract NFTMarketplace is ERC721Holder, Ownable {
 
         feePercentage = newFeePercentage;
     }
-
-    // Optional features can be added here:
-    // 1. Ability to track statistics of the listing and sales of NFT on the marketplace
-    // 2. Auction functionality where users can bid and highest bidder wins
-    // 3. Escrow mechanism to hold funds until the buyer confirms receipt of the NFT
-    // 4. Rating and review system for buyers and sellers
-    // 5. Integration with external payment systems for multiple currency support
 }
